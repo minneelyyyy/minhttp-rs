@@ -135,7 +135,7 @@ async fn create_response(request: Request, config: &ServerInfo) -> Result<Respon
     if request.headers.get("Host").filter(|h| config.host_check(*h)).is_none() {
         return error(400, config).await;
     }
-  
+
     let md = match fs::metadata(config.path(&request.resource)) {
         Ok(m) => m,
         Err(_) => return error(404, config).await,
