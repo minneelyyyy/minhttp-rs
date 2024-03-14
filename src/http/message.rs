@@ -21,7 +21,7 @@ impl Display for MessageParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", match self {
             Self::Header => "failed to parse header",
-            Self::ConnectionClosed => "failed to read in a request line",
+            Self::ConnectionClosed => "the connection was closed",
             Self::RequestLineParse => "failed to parse request line",
         })
     }
