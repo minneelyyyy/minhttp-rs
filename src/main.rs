@@ -157,7 +157,7 @@ async fn handle_connection<S: AsyncRead + AsyncWrite>(stream: S, config: ServerI
             Err(e) => {
                 return e.downcast::<MessageParseError>().and_then(|msg_err| {
                     match msg_err {
-                        MessageParseError::RequestLineRead => Ok(()),
+                        MessageParseError::ConnectionClosed => Ok(()),
                         _ => Err(msg_err.into()),
                     }
                 });

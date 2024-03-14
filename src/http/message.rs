@@ -12,7 +12,7 @@ use crate::http::{request::Request, response::Response};
 
 #[derive(Debug)]
 pub enum MessageParseError {
-    RequestLineRead,
+    ConnectionClosed,
     RequestLineParse,
     Header,
 }
@@ -21,7 +21,7 @@ impl Display for MessageParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", match self {
             Self::Header => "failed to parse header",
-            Self::RequestLineRead => "failed to read in a request line",
+            Self::ConnectionClosed => "failed to read in a request line",
             Self::RequestLineParse => "failed to parse request line",
         })
     }
@@ -170,7 +170,7 @@ impl<R: AsyncBufRead + Unpin> Deserialize<R> for Message {
 
         let request_line = match lines.next_line().await? {
             Some(r) => r,
-            None => return Err(MessageParseError::RequestLineRead.into()),
+            None => return Err(MessageParseError::ConnectionClosed.into()),
         };
 
         let mut headers: HashMap<String, String> = HashMap::new();
