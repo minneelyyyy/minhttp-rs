@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::fs::File;
@@ -27,21 +28,16 @@ struct HttpConfig {
 struct HttpsConfig {
     port: Option<u16>,
     address: Option<String>,
-    key: String,
-    cert: String,
+    key: PathBuf,
+    cert: PathBuf,
 }
 
 #[derive(Deserialize, Clone)]
-struct ServerConfig {
+struct Config {
     root: String,
     host: String,
     http: Option<HttpConfig>,
     https: Option<HttpsConfig>,
-}
-
-#[derive(Deserialize)]
-struct Config {
-    server: Vec<ServerConfig>,
 }
 
 struct ServerInfo {
@@ -51,6 +47,10 @@ struct ServerInfo {
 }
 
 impl ServerInfo {
+    fn new(root: String, host: String, port: u16) -> Self {
+        Self { root, host, port }
+    }
+
     fn path(&self, pathstr: &str) -> String {
         format!("{}/{}", self.root, pathstr)
     }
@@ -60,44 +60,96 @@ impl ServerInfo {
     }
 }
 
+fn load_certs(path: &std::path::Path) -> std::io::Result<Vec<pki_types::CertificateDer<'static>>> {
+    rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(path)?)).collect()
+}
+
+fn load_key(path: &std::path::Path) -> pki_types::PrivateKeyDer<'static> {
+    rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(path).unwrap())).unwrap().unwrap()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config: Config = toml::from_str(&fs::read_to_string("minhttp.toml")?)?;
+    let httphandle: Option<tokio::task::JoinHandle<Result<()>>>;
+    let httpshandle: Option<tokio::task::JoinHandle<Result<()>>>;
 
-    for server in config.server {
-        let handle = tokio::spawn(async move {
-            if server.http.is_none() {
-                eprintln!("No HTTP defined!");
-                return;
-            }
+    httphandle = config.http.clone().map(|http| {
+        let config = config.clone();
 
-            let http = server.http.clone().unwrap();
+        let address = http.address.unwrap_or("127.0.0.1".into());
+        let port = http.port.unwrap_or(80);
 
-            let listen = net::TcpListener::bind(format!("{}:{}",
-                http.address.unwrap_or("127.0.0.1".into()), http.port.unwrap_or(80))
-            ).await.expect("failed to open listen socket");
+        tokio::spawn(async move {
+            let socket = net::TcpListener::bind(format!("{}:{}", address, port)).await?;
 
             loop {
-                let (socket, _) = listen.accept().await.expect("failed to accept connection");
-
-                let server = server.clone();
+                let (connection, _) = socket.accept().await?;
+                
+                let root = config.root.clone();
+                let host = config.host.clone();
 
                 tokio::spawn(async move {
-                    match handle_connection(socket, ServerInfo {
-                        root: server.root,
-                        host: server.host,
-                        port: server.http.unwrap().port.unwrap_or(80)
-                    }).await {
+                    match handle_connection(connection, ServerInfo::new(root, host, port)).await {
                         Ok(()) => (),
                         Err(e) => {
-                            eprintln!("An error occured while handling request: {e}");
+                            eprintln!("an error occured while handling request: {e}");
                         }
                     }
                 });
             }
-        });
+        })
+    });
 
-        let _ = handle.await;
+    httpshandle = config.https.clone().map(|https| {
+        let config = config.clone();
+
+        let address = https.address.unwrap_or("127.0.0.1".into());
+        let port = https.port.unwrap_or(443);
+        let certs = load_certs(&https.cert).unwrap();
+        let key = load_key(&https.key);
+
+        let rustlsconfig = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err)).unwrap();
+
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(rustlsconfig));
+            let socket = net::TcpListener::bind(format!("{}:{}", address, port)).await?;
+
+            loop {
+                let (stream, _) = socket.accept().await?;
+                let acceptor = acceptor.clone();
+
+                let root = config.root.clone();
+                let host = config.host.clone();
+
+                tokio::spawn(async move {
+                    let stream = acceptor.accept(stream).await.unwrap();
+
+                    match handle_connection(stream, ServerInfo::new(root, host, port)).await {
+                        Ok(()) => (),
+                        Err(e) => {
+                            eprintln!("an error occured while handling request: {e}");
+                        }
+                    }
+                });
+            }
+        })
+    });
+
+    let (httpres, httpsres) = tokio::join!(
+        httphandle.unwrap_or(tokio::spawn(async { Ok(()) })),
+        httpshandle.unwrap_or(tokio::spawn(async { Ok(()) })),
+    );
+
+    if let Err(e) = httpres {
+        eprintln!("HTTP server crashed during execution: {e}");
+    }
+
+    if let Err(e) = httpsres {
+        eprintln!("HTTPS server crashed during execution: {e}");
     }
 
     Ok(())
@@ -112,6 +164,7 @@ async fn handle_connection<S: AsyncRead + AsyncWrite>(stream: S, config: ServerI
 
         match msg {
             Message::Request(req) => {
+                println!("{} {}", req.method, req.resource);
                 writer.write_obj(&create_response(req, &config).await?).await?;
             },
 
@@ -147,7 +200,7 @@ async fn create_response(request: Request, config: &ServerInfo) -> Result<Respon
         request.resource
     };
 
-    let mut file = File::open(&config.path(&path)).await.unwrap();
+    let mut file = File::open(&config.path(&path)).await?;
 
     Response::serve_file(Version::Http11, &mut file).await
 }

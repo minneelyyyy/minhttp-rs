@@ -8,7 +8,6 @@ use anyhow::Result;
 use crate::http::message::Version;
 use crate::http::Serialize;
 
-#[derive(Debug)]
 pub struct Response {
     pub version: Version,
     pub code: u32,
@@ -18,26 +17,23 @@ pub struct Response {
 }
 
 impl Response {
-    pub async fn new<R>(version: Version, errno: u32, errstr: &str, headers: HashMap<String, String>, body: &mut R) -> Result<Self>
+    pub async fn new<R>(version: Version, code: u32, message: &str, headers: HashMap<String, String>, body: &mut R) -> Result<Self>
     where
         R: AsyncRead + Unpin
     {
         let mut bodyvec = vec![];
 
         if let Some(length) = headers.get("Content-Length").map(|l| l.parse::<usize>()) {
-            match length {
-                Ok(length) => {
-                    bodyvec = vec![0u8; length];
-                    body.read_exact(&mut bodyvec).await?;
-                },
-                Err(e) => return Err(e.into())
-            }
+            let length = length?;
+
+            bodyvec = vec![0u8; length];
+            body.read_exact(&mut bodyvec).await?;
         }
 
         Ok(Self {
             version,
-            code: errno,
-            message: errstr.into(),
+            code,
+            message: message.into(),
             headers,
             body: bodyvec,
         })
@@ -118,7 +114,7 @@ impl Response {
             ("Content-Length".into(), file.metadata().await?.len().to_string())
         ]);
 
-        Self::new(version, code, Self::message(code).unwrap_or("Unknown Code"), headers, file).await
+        Self::new(version, code, Self::message(code).unwrap_or("Unknown"), headers, file).await
     }
 
     pub async fn serve_file(version: Version, file: &mut File) -> Result<Self> {
@@ -130,7 +126,7 @@ impl Serialize for Response {
     fn serialize(&self) -> Result<Vec<u8>> {
         let mut out = String::new();
 
-        write!(out, "{} {} {}\r\n", self.version.to_str(), self.code.to_string(), self.message)?;
+        write!(out, "{} {} {}\r\n", self.version, self.code.to_string(), self.message)?;
 
         for header in &self.headers {
             write!(out, "{}: {}\r\n", header.0, header.1)?;

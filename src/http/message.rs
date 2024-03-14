@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use anyhow::Result;
 
 use crate::http::Deserialize;
+use crate::http::Serialize;
 use crate::http::{request::Request, response::Response};
 
 #[derive(Debug)]
@@ -28,64 +29,116 @@ impl Display for MessageParseError {
 
 impl Error for MessageParseError {}
 
-#[derive(Debug)]
 pub enum Method {
     Get,
+    Head,
     Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
 }
 
-impl Method {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "GET" => Some(Self::Get),
-            "POST" => Some(Self::Post),
-            _ => None
-        }
-    }
+#[derive(Debug)]
+pub enum MethodParseError {
+    InvalidMethod,
+}
 
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Post => "POST",
+impl Display for MethodParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", match self {
+            Self::InvalidMethod => "the method supplied does not exist",
+        })
+    }
+}
+
+impl Error for MethodParseError {}
+
+impl std::str::FromStr for Method {
+    type Err = MethodParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "GET" => Ok(Self::Get),
+            "HEAD" => Ok(Self::Head),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "DELETE" => Ok(Self::Delete),
+            "CONNECT" => Ok(Self::Connect),
+            "OPTIONS" => Ok(Self::Options),
+            "TRACE" => Ok(Self::Trace),
+            "PATCH" => Ok(Self::Patch),
+            _ => Err(MethodParseError::InvalidMethod),
         }
     }
 }
 
 impl fmt::Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_str())
+        let m = match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Connect => "CONNECT",
+            Self::Options => "OPTIONS",
+            Self::Trace => "TRACE",
+            Self::Patch => "PATCH",
+        };
+
+        write!(f, "{}", m)
     }
 }
 
-#[derive(Debug)]
 pub enum Version {
     Http11,
-    #[allow(dead_code)]
     Http2,
-    #[allow(dead_code)]
     Http3,
 }
 
-impl Version {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "HTTP/1.1" => Some(Self::Http11),
-            "HTTP/2" => Some(Self::Http2),
-            "HTTP/3" => Some(Self::Http3),
-            _ => None
-        }
-    }
+#[derive(Debug)]
+pub enum VersionParseError {
+    InvalidVersion,
+}
 
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            Self::Http11 => "HTTP/1.1",
-            Self::Http2 => "HTTP/2",
-            Self::Http3 => "HTTP/3",
+impl fmt::Display for VersionParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v = match self {
+            Self::InvalidVersion => "the version supplied does not exist",
+        };
+
+        write!(f, "{}", v)
+    }
+}
+
+impl Error for VersionParseError {}
+
+impl std::str::FromStr for Version {
+    type Err = VersionParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "HTTP/1.1" => Ok(Self::Http11),
+            "HTTP/2" => Ok(Self::Http2),
+            "HTTP/3" => Ok(Self::Http3),
+            _ => Err(VersionParseError::InvalidVersion.into())
         }
     }
 }
 
-#[derive(Debug)]
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", match self {
+            Self::Http11 => "HTTP/1.1",
+            Self::Http2 => "HTTP/2",
+            Self::Http3 => "HTTP/3",
+        })
+    }
+}
+
 pub enum Message {
     Request(Request),
     Response(Response),
@@ -93,10 +146,20 @@ pub enum Message {
 
 impl Message {
     async fn parse<R: AsyncBufRead + Unpin>(request_line: &str, headers: HashMap<String, String>, body: &mut R) -> Result<Self> {
-        match request_line.splitn(3, ' ').collect::<Vec<&str>>().as_slice() {
-            ["HTTP/1.1", errno, errstr] => Ok(Message::Response(Response::new(Version::Http11, errno.parse()?, errstr, headers, body).await?)),
-            [method, resource, "HTTP/1.1"] => Ok(Message::Request(Request::new(Method::from_str(method).unwrap(), resource, Version::Http11, headers, body).await?)),
-            _ => Err(MessageParseError::RequestLineParse.into()),
+        let parts = request_line.splitn(3, ' ').collect::<Vec<&str>>();
+
+        if parts.len() != 3 {
+            return Err(MessageParseError::RequestLineParse.into());
+        }
+
+        if let Ok(method) = parts[0].parse::<Method>() {
+            let (method, resource, version) = (method, parts[1], parts[2]);
+            Ok(Request::new(method, resource, version.parse()?, headers, body).await?.into())
+        } else if let Ok(version) = parts[0].parse::<Version>() {
+            let (version, code, message) = (version, parts[1], parts[2]);
+            Ok(Response::new(version, code.parse()?, message, headers, body).await?.into())
+        } else {
+            Err(MessageParseError::RequestLineParse.into())
         }
     }
 }
@@ -104,31 +167,40 @@ impl Message {
 impl<R: AsyncBufRead + Unpin> Deserialize<R> for Message {
     async fn deserialize(reader: &mut R) -> Result<Self> {
         let mut lines = reader.lines();
-        let mut request_line = String::new();
 
-        while let Some(line) = lines.next_line().await? {
-            if !line.is_empty() {
-                request_line = line;
-                break;
-            }
-        }
-
-        if request_line.is_empty() {
-            return Err(MessageParseError::RequestLineRead.into());
-        }
+        let request_line = match lines.next_line().await? {
+            Some(r) => r,
+            None => return Err(MessageParseError::RequestLineRead.into()),
+        };
 
         let mut headers: HashMap<String, String> = HashMap::new();
 
-        while let Some(line) = lines.next_line().await? {
-            if line.is_empty() {
-                break;
-            }
-
+        while let Some(line) = lines.next_line().await?.filter(|l| !l.is_empty()) {
             let (left, right) = line.split_once(": ").ok_or(MessageParseError::Header)?;
-
             headers.insert(left.into(), right.into());
         }
 
         Message::parse(&request_line, headers, lines.get_mut()).await
+    }
+}
+
+impl Serialize for Message {
+    fn serialize(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Request(req) => req.serialize(),
+            Self::Response(res) => res.serialize(),
+        }
+    }
+}
+
+impl From<Request> for Message {
+    fn from(value: Request) -> Self {
+        Self::Request(value)
+    }
+}
+
+impl From<Response> for Message {
+    fn from(value: Response) -> Self {
+        Self::Response(value)
     }
 }
