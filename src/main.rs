@@ -152,16 +152,15 @@ async fn handle_connection<S: AsyncRead + AsyncWrite>(stream: S, config: ServerI
     let (mut reader, mut writer) = http.split();
 
     loop {
-        let msg: Message = match reader.read_obj().await {
+        let msg = match reader.read_obj().await {
             Ok(m) => m,
-            Err(e) => {
+            Err(e) =>
                 return e.downcast::<MessageParseError>().and_then(|msg_err| {
                     match msg_err {
                         MessageParseError::ConnectionClosed => Ok(()),
                         _ => Err(msg_err.into()),
                     }
-                });
-            }
+                }),
         };
 
         match msg {
