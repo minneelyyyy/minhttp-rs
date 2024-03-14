@@ -12,7 +12,7 @@ use anyhow::Result;
 
 mod http;
 
-use http::message::{Message, Version};
+use http::message::{Message, MessageParseError, Version};
 use http::response::Response;
 use http::request::Request;
 use http::stream::HttpStream;
@@ -139,18 +139,10 @@ async fn main() -> Result<()> {
         })
     });
 
-    let (httpres, httpsres) = tokio::join!(
+    let _ = tokio::join!(
         httphandle.unwrap_or(tokio::spawn(async { Ok(()) })),
         httpshandle.unwrap_or(tokio::spawn(async { Ok(()) })),
     );
-
-    if let Err(e) = httpres {
-        eprintln!("HTTP server crashed during execution: {e}");
-    }
-
-    if let Err(e) = httpsres {
-        eprintln!("HTTPS server crashed during execution: {e}");
-    }
 
     Ok(())
 }
@@ -160,7 +152,17 @@ async fn handle_connection<S: AsyncRead + AsyncWrite>(stream: S, config: ServerI
     let (mut reader, mut writer) = http.split();
 
     loop {
-        let msg: Message = reader.read_obj().await?;
+        let msg: Message = match reader.read_obj().await {
+            Ok(m) => m,
+            Err(e) => {
+                return e.downcast::<MessageParseError>().and_then(|msg_err| {
+                    match msg_err {
+                        MessageParseError::RequestLineRead => Ok(()),
+                        _ => Err(msg_err.into()),
+                    }
+                });
+            }
+        };
 
         match msg {
             Message::Request(req) => {
