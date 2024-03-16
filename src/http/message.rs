@@ -168,10 +168,8 @@ impl<R: AsyncBufRead + Unpin> Deserialize<R> for Message {
     async fn deserialize(reader: &mut R) -> Result<Self> {
         let mut lines = reader.lines();
 
-        let request_line = match lines.next_line().await? {
-            Some(r) => r,
-            None => return Err(MessageParseError::ConnectionClosed.into()),
-        };
+        let request_line = lines.next_line().await?
+            .ok_or(MessageParseError::ConnectionClosed)?;
 
         let mut headers: HashMap<String, String> = HashMap::new();
 
