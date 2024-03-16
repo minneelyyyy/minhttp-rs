@@ -1,6 +1,7 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
+use std::io;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::fs::File;
@@ -60,12 +61,12 @@ impl ServerInfo {
     }
 }
 
-fn load_certs(path: &std::path::Path) -> std::io::Result<Vec<pki_types::CertificateDer<'static>>> {
-    rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(path)?)).collect()
+fn load_certs(path: &Path) -> io::Result<Vec<pki_types::CertificateDer<'static>>> {
+    rustls_pemfile::certs(&mut std::io::BufReader::new(fs::File::open(path)?)).collect()
 }
 
-fn load_key(path: &std::path::Path) -> pki_types::PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(path).unwrap())).unwrap().unwrap()
+fn load_key(path: &Path) -> io::Result<Option<pki_types::PrivateKeyDer<'static>>> {
+    rustls_pemfile::private_key(&mut io::BufReader::new(fs::File::open(path)?))
 }
 
 #[tokio::main]
@@ -106,13 +107,18 @@ async fn main() -> Result<()> {
 
         let address = https.address.unwrap_or("127.0.0.1".into());
         let port = https.port.unwrap_or(443);
-        let certs = load_certs(&https.cert).unwrap();
-        let key = load_key(&https.key);
+
+        let certs = load_certs(&https.cert).expect("failed to get certificate");
+
+        let key = load_key(&https.key)
+            .expect("failed to open or read key file")
+            .expect("no key found in file");
 
         let rustlsconfig = tokio_rustls::rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err)).unwrap();
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+            .expect("failed to create TLS config");
 
         tokio::spawn(async move {
             let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(rustlsconfig));
@@ -126,7 +132,13 @@ async fn main() -> Result<()> {
                 let host = config.host.clone();
 
                 tokio::spawn(async move {
-                    let stream = acceptor.accept(stream).await.unwrap();
+                    let stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("failed to accept on stream: {e}");
+                            return;
+                        }
+                    };
 
                     match handle_connection(stream, ServerInfo::new(root, host, port)).await {
                         Ok(()) => (),
